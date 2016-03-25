@@ -16,7 +16,7 @@ name = "rustful"
 path = "src/lib.rs"
 
 [features]
-default = ["rustc_json_body", "ssl", "multipart"]
+default = ["rustc_json_body", "multipart"]
 rustc_json_body = ["rustc-serialize"]
 ssl = ["hyper/ssl"]
 
@@ -32,7 +32,8 @@ phf = "0.7"
 num_cpus = "0.2"
 
 [dependencies.hyper]
-version = "0.8"
+git = "https://github.com/hyperium/hyper"
+branch = "mio"
 default-features = false
 
 [dependencies.multipart]
