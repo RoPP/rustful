@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use time;
 use num_cpus;
 
-use url::percent_encoding::{percent_decode, percent_decode_to};
-use url::{Url, SchemeData};
+use url::percent_encoding::percent_decode;
+use url::Url;
 
 use hyper::{self, Encoder, Decoder, Next, Control};
 use hyper::server::Handler as HyperHandler;
@@ -158,7 +158,7 @@ fn parse_path(path: &str) -> ParsedUri {
         Some(index) => {
             let (query, fragment) = parse_fragment(&path[index+1..]);
 
-            let mut path = percent_decode(path[..index].as_bytes());
+            let mut path: Vec<_> = percent_decode(path[..index].as_bytes()).collect();
             if path.is_empty() {
                 path.push(b'/');
             }
@@ -167,13 +167,13 @@ fn parse_path(path: &str) -> ParsedUri {
                 host: None,
                 uri: Uri::Path(path.into()),
                 query: utils::parse_parameters(query.as_bytes()),
-                fragment: fragment.map(|f| percent_decode(f.as_bytes()).into())
+                fragment: fragment.map(|f| percent_decode(f.as_bytes()).collect::<Vec<_>>().into()),
             }
         },
         None => {
             let (path, fragment) = parse_fragment(&path);
 
-            let mut path = percent_decode(path.as_bytes());
+            let mut path: Vec<_> = percent_decode(path.as_bytes()).collect();
             if path.is_empty() {
                 path.push(b'/');
             }
@@ -182,7 +182,7 @@ fn parse_path(path: &str) -> ParsedUri {
                 host: None,
                 uri: Uri::Path(path.into()),
                 query: Parameters::new(),
-                fragment: fragment.map(|f| percent_decode(f.as_bytes()).into())
+                fragment: fragment.map(|f| percent_decode(f.as_bytes()).collect::<Vec<_>>().into())
             }
         }
     }
@@ -196,31 +196,20 @@ fn parse_fragment(path: &str) -> (&str, Option<&str>) {
 }
 
 fn parse_url(url: &Url) -> ParsedUri {
-    let mut path = Vec::new();
-    for component in url.path().unwrap_or(&[]) {
-        path.push(b'/');
-        percent_decode_to(component.as_bytes(), &mut path);
-    }
-    if path.is_empty() {
-        path.push(b'/');
-    }
+    let mut path = vec![];
+    path.extend(percent_decode(url.path().as_bytes()));
 
     let query = url.query_pairs()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
 
-    let host = if let SchemeData::Relative(ref data) = url.scheme_data {
-        Some((data.host.serialize(), data.port))
-    } else {
-        None
-    };
+    let host = url.host_str().map(|host| (host.into(), url.port()));
 
     ParsedUri {
         host: host,
         uri: Uri::Path(path.into()),
         query: query,
-        fragment: url.fragment.as_ref().map(|f| percent_decode(f.as_bytes()).into())
+        fragment: url.fragment().as_ref().map(|f| percent_decode(f.as_bytes()).collect::<Vec<_>>().into())
     }
 }
 
@@ -238,7 +227,7 @@ impl HyperServer {
 
     #[cfg(feature = "ssl")]
     fn https(host: &SocketAddr, cert: PathBuf, key: PathBuf) -> HttpResult<HyperServer> {
-        let ssl = try!(Openssl::server_with_cert_and_key(cert, key));
+        let ssl = try!(Openssl::with_cert_and_key(cert, key));
         hyper::server::Server::https(host, ssl).map(HyperServer::Https)
     }
 
@@ -363,7 +352,9 @@ impl<T: Transport, R: Router> HyperHandler<T> for RequestHandler<R> where
             response.headers.set(ContentType(self.config.content_type.clone()));
             response.headers.set(::header::Server(self.config.server.clone()));
 
-            let path_components = match *request.uri() {
+            let (method, request_uri, http_version, mut request_headers) = request.deconstruct();
+
+            let path_components = match request_uri {
                 RequestUri::AbsoluteUri(ref url) => Some(parse_url(url)),
                 RequestUri::AbsolutePath(ref path) => Some(parse_path(path)),
                 RequestUri::Star => {
@@ -379,15 +370,19 @@ impl<T: Transport, R: Router> HyperHandler<T> for RequestHandler<R> where
 
             let (write_method, next) = match path_components {
                 Some(ParsedUri{ host, uri, query, fragment }) => {
-                    /*if let Some((name, port)) = host {
-                        request_headers.set(::header::Host {
-                            hostname: name,
-                            port: port
-                        });
-                    }*/
+                    if request_headers.get::<::header::Host>().is_none() {
+                        if let Some((name, port)) = host {
+                            request_headers.set(::header::Host {
+                                hostname: name,
+                                port: port
+                            });
+                        }
+                    }
 
                     let mut context = RawContext {
-                        request: request,
+                        method: method,
+                        http_version: http_version,
+                        headers: request_headers,
                         uri: uri,
                         hyperlinks: vec![],
                         variables: Parameters::new(),
@@ -410,7 +405,7 @@ impl<T: Transport, R: Router> HyperHandler<T> for RequestHandler<R> where
                                     variables: HashMap::new(),
                                     hyperlinks: vec![]
                                 }
-                            }, |path| config.handlers.find(&context.request.method(), &mut (&path[..]).into()));
+                            }, |path| config.handlers.find(&context.method, &mut (&path[..]).into()));
 
                             let Endpoint {
                                 handler,
